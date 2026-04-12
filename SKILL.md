@@ -1,12 +1,12 @@
 ---
 name: daily-memory-save
-description: Periodically reviews conversation history and writes memory files to maintain agent continuity across sessions. Dual-layer system with daily raw notes and curated long-term memory.
+description: Periodically reviews conversation history and writes memory files to maintain agent continuity across sessions. Dual-layer system with daily raw notes and curated long-term memory. Also performs startup gap recovery: detects dates with session transcripts but no daily note and backfills missing summaries safely.
 metadata: {"openclaw":{"writablePaths":["memory/","MEMORY.md"],"retention":"persistent, user-managed, review regularly","security":"writes only to declared workspace paths, no external network access, no credential handling","homepage":"https://github.com/meimakes/daily-memory-save","author":"Mei Park (@meimakes)"}}
 ---
 
 # Daily Memory Save Skill
 
-Periodically reviews conversation history and writes memory files to maintain agent continuity across sessions.
+Periodically reviews conversation history and writes memory files to maintain agent continuity across sessions. Includes startup gap recovery to backfill summaries for sessions that were missed.
 
 ## ⚠️ Privacy & Transparency Notice
 
@@ -23,6 +23,8 @@ Periodically reviews conversation history and writes memory files to maintain ag
 ## What It Does
 
 Runs as a recurring system event in the main session. Reviews recent conversations for anything worth remembering and writes daily memory notes.
+
+On session startup, also scans for gaps — dates where session transcripts exist but no daily note was written — and backfills them safely.
 
 ## Cron Setup
 
@@ -43,6 +45,14 @@ Create or update workspace/memory/YYYY-MM-DD.md (today's date) with a daily note
 capturing what matters. If anything is significant enough for long-term memory,
 also update workspace/MEMORY.md.
 
+CRITICAL — DEDUP BEFORE WRITING:
+Before adding ANY section to a memory file, READ the file first and check if that
+section or substantially similar content already exists. If it does, SKIP it.
+Use the Edit tool to make surgical additions — do NOT rewrite or re-append the
+entire file. Compare section headers (## headings) and key phrases to detect dupes.
+If the file already covers a topic, only add genuinely NEW details under the
+existing section. Never append a section that duplicates an existing one.
+
 If it's been a quiet day with nothing notable, skip silently.
 Be selective — capture signal, not noise. Write like future-you will need this context.
 Do NOT message the user about this — just do it quietly.
@@ -53,6 +63,63 @@ If you prefer to be notified when memories are saved, replace "Do NOT message th
 ```
 After saving, send a brief summary of what was captured (1-2 lines max).
 ```
+
+## Startup Gap Recovery
+
+On session start, detect dates with transcript data but no daily memory note and backfill the missing summaries.
+
+### Transcript Location
+
+Default path: `~/.openclaw/agents/<agent-id>/sessions/*.jsonl`
+
+> Agent ID comes from runtime context (e.g., `wren`). Path may vary by config — check your `openclaw.json` if the default doesn't exist.
+
+First line of each JSONL file:
+```json
+{"type":"session","version":3,"id":"<uuid>","timestamp":"<ISO-8601>","cwd":"..."}
+```
+The `timestamp` field gives the session date. Subsequent lines are message records with `role` and `content`.
+
+### Safety Guardrails
+
+- **maxBackfillDays: 3** — only process the 3 most recent gaps per startup; ignore older ones
+- **First install** (no existing daily notes at all): use **dry-run mode** — report gaps found but don't write anything; let the user decide whether to backfill
+- **Spawn sub-agents** for summarization to avoid bloating the main session context.
+  Prefer a cheap model like `gpt-4o-mini` if the agent config allows it — pass
+  transcript content and target date explicitly in the spawn task
+- **Report** what was recovered (or what gaps exist in dry-run); never skip silently on first install
+
+### How It Triggers
+
+Gap recovery is **not a cron job**. It runs automatically when the agent reads this skill at session startup (triggered by the skill description match during the agent's startup sequence). No additional scheduling is needed — installing the skill is sufficient.
+
+### Procedure
+
+On session start, the agent follows these steps:
+
+1. Determine the agent sessions directory: `~/.openclaw/agents/<agent-id>/sessions/`
+   (agent-id from runtime context, e.g. `wren`).
+2. List `*.jsonl` files. For each, read line 1 to extract the date from the
+   `timestamp` field (ISO-8601 → YYYY-MM-DD). Use `node` for JSON parsing —
+   `jq` is not available in all OpenClaw environments.
+3. List existing `memory/YYYY-MM-DD.md` files in workspace.
+4. Identify gaps: dates with transcripts but no corresponding memory file.
+   Exclude today's date — the active session is handled by the cron.
+5. **First-install check** — if no `memory/*.md` files exist at all:
+   - Report all gaps found (dates and transcript counts)
+   - Do NOT write any files
+   - Ask the user whether to backfill
+   - Stop here
+6. Otherwise, take at most the **3 most recent** gap dates.
+7. For each gap date:
+   - Read the transcript JSONL (message lines only, skip the session header)
+   - Spawn a sub-agent (model: `gpt-4o-mini`) with the transcript content
+   - Sub-agent task: summarize into `memory/YYYY-MM-DD.md` following the
+     Memory File Format below. Include decisions, preferences, project updates,
+     lessons learned. Be selective — signal not noise.
+8. After all gaps processed, report briefly:
+   `"Gap recovery: backfilled N date(s): [list]. M older gaps skipped."`
+9. If no gaps found, skip silently.
 
 ## Memory File Format
 
@@ -73,6 +140,7 @@ Curated, distilled insights that persist beyond daily context. Updated when some
 - **Silent by default**: Configurable — see Notification Mode above
 - **Selective capture**: Signal over noise — skip quiet periods entirely
 - **Dual-layer memory**: Daily notes for raw context, MEMORY.md for distilled wisdom
+- **Gap recovery on startup**: Detects and backfills missed sessions; first-install dry-run prevents accidental bulk writes
 
 ## Requirements
 
